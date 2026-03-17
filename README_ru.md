@@ -1,35 +1,35 @@
-# Hermes Agent Token Optimization Guide
+# Руководство по оптимизации токенов Hermes Agent
 
-Comprehensive strategies for reducing LLM token consumption in Hermes Agent deployments — from zero-cost config tweaks to architectural redesigns.
+Комплексные стратегии снижения потребления токенов LLM в развертываниях Hermes Agent — от бесплатных настроек конфигурации до архитектурных изменений.
 
-## Table of Contents
+## Содержание
 
-- [Anatomy of a Single API Call](#anatomy-of-a-single-api-call)
-- [Token Budget per Layer](#token-budget-per-layer)
-- [Optimization Strategies](#optimization-strategies)
-  - [Layer 0: Zero-Cost Config Changes](#layer-0-zero-cost-config-changes)
-  - [Layer 1: Platform-Aware Context](#layer-1-platform-aware-context)
-  - [Layer 2: Adaptive Tool Routing](#layer-2-adaptive-tool-routing)
-  - [Layer 3: Smart Skill Selection](#layer-3-smart-skill-selection)
-  - [Layer 4: Schema Compression](#layer-4-schema-compression)
-  - [Layer 5: History & Compression](#layer-5-history--compression)
-  - [Layer 6: Model Routing](#layer-6-model-routing)
-  - [Layer 7: Architectural Patterns](#layer-7-architectural-patterns)
-  - [Layer 8: Language & Reasoning Format](#layer-8-language--reasoning-format)
-- [Harness Quality (Indirect Token Savings)](#harness-quality-indirect-token-savings)
-  - [Hashline-Enhanced File Editing](#hashline-enhanced-file-editing)
-  - [TTSR (Time Traveling Streaming Rules)](#ttsr-time-traveling-streaming-rules)
-  - [Workspace Files Optimization](#workspace-files-from-openclaw-anatomy)
-- [Offline Batch Processing (No API Costs)](#offline-batch-processing-no-api-costs)
-  - [MOEX Backtesting Pipeline](#scenario-moex-backtesting-with-local-models)
-  - [Provider Independence](#7e-provider-independence-resilience-layer)
-- [Use Case Matrix](#use-case-matrix)
-- [Implementation Roadmap](#implementation-roadmap)
-- [Anti-Patterns](#anti-patterns)
+- [Анатомия одного API-вызова](#anatomy-of-a-single-api-call)
+- [Бюджет токенов по слоям](#token-budget-per-layer)
+- [Стратегии оптимизации](#optimization-strategies)
+  - [Слой 0: Бесплатные изменения конфигурации](#layer-0-zero-cost-config-changes)
+  - [Слой 1: Контекст, зависящий от платформы](#layer-1-platform-aware-context)
+  - [Слой 2: Адаптивная маршрутизация инструментов](#layer-2-adaptive-tool-routing)
+  - [Слой 3: Умный выбор навыков](#layer-3-smart-skill-selection)
+  - [Слой 4: Сжатие схем](#layer-4-schema-compression)
+  - [Слой 5: История и сжатие](#layer-5-history--compression)
+  - [Слой 6: Маршрутизация модели](#layer-6-model-routing)
+  - [Слой 7: Архитектурные паттерны](#layer-7-architectural-patterns)
+  - [Слой 8: Язык и формат рассуждений](#layer-8-language--reasoning-format)
+- [Качество инструментов (Косвенная экономия токенов)](#harness-quality-indirect-token-savings)
+  - [Редактирование файлов с хеш-линиями](#hashline-enhanced-file-editing)
+  - [TTSR (Правила потоковой передачи с путешествием во времени)](#ttsr-time-traveling-streaming-rules)
+  - [Оптимизация файлов рабочего пространства](#workspace-files-from-openclaw-anatomy)
+- [Пакетная обработка офлайн (Без затрат на API)](#offline-batch-processing-no-api-costs)
+  - [Конвейер бэктестинга MOEX](#scenario-moex-backtesting-with-local-models)
+  - [Независимость от провайдера](#7e-provider-independence-resilience-layer)
+- [Матрица вариантов использования](#use-case-matrix)
+- [Дорожная карта внедрения](#implementation-roadmap)
+- [Антипаттерны](#anti-patterns)
 
 ---
 
-## Anatomy of a Single API Call
+## Анатомия одного API-вызова
 
 Every message sent to the LLM contains these components:
 
@@ -85,7 +85,7 @@ Every message sent to the LLM contains these components:
 
 ---
 
-## Token Budget per Layer
+## Бюджет токенов по слоям
 
 | Layer | Chars | Tokens | % of baseline | Removable? |
 |-------|-------|--------|---------------|------------|
@@ -100,9 +100,9 @@ Every message sent to the LLM contains these components:
 
 ---
 
-## Optimization Strategies
+## Стратегии оптимизации
 
-### Layer 0: Zero-Cost Config Changes
+### Слой 0: Бесплатные изменения конфигурации
 
 No code changes. Flip existing config flags.
 
@@ -152,7 +152,7 @@ display:
 
 ---
 
-### Layer 1: Platform-Aware Context
+### Слой 1: Контекст платформы
 
 Make context loading conditional on platform and task type.
 
@@ -222,7 +222,7 @@ Define separate toolsets per platform with different tool scopes:
 
 ---
 
-### Layer 2: Adaptive Tool Routing
+### Слой 2: Адаптивная маршрутизация инструментов
 
 Dynamically select which tool schemas to include based on the user's message.
 
@@ -394,7 +394,7 @@ Turn 2: same message → call with full toolset
 
 ---
 
-### Layer 3: Smart Skill Selection
+### Слой 3: Умный выбор навыков
 
 Skills index is the third-largest token consumer. Replace "all skills listed" with "relevant skills only."
 
@@ -477,7 +477,7 @@ class SkillRouter:
 
 ---
 
-### Layer 4: Schema Compression
+### Слой 4: Сжатие схем
 
 Tool schemas are the single largest token consumer. Compress them.
 
@@ -541,7 +541,7 @@ If multiple tools share parameter types (e.g., file paths), use JSON Schema `$re
 
 ---
 
-### Layer 5: History & Compression
+### Слой 5: История & Compression
 
 Conversation history grows linearly with each turn. Unchecked, it becomes the dominant cost.
 
@@ -621,7 +621,7 @@ if turn_count > MAX_SESSION_TURNS:
 
 ---
 
-### Layer 6: Model Routing
+### Слой 6: Маршрутизация модели
 
 Not every query needs the most capable (and most expensive) model.
 
@@ -678,7 +678,7 @@ result = full_agent.run_conversation(
 
 ---
 
-### Layer 7: Architectural Patterns
+### Слой 7: Архитектурные паттерны
 
 #### 7a. Stateless micro-agents
 
@@ -832,69 +832,69 @@ PROVIDER_CHAIN = [
 
 ---
 
-### Layer 8: Language & Reasoning Format
+### Слой 8: Язык и формат рассуждений
 
-Not all text costs the same. Russian consumes ~2.6x more tokens than English due to 
-tokenizer vocabulary bias. But more importantly: **LLMs reason through language**.
+Не все тексты стоят одинаково. Русский язык потребляет ~2.6x больше токенов, чем английский, 
+из-за особенностей токенизатора. Но главное: **LLM рассуждают через язык**.
 
-#### 8a. The Language Architecture (4-Layer Model)
+#### 8a. Языковая архитектура (4-слойная модель)
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│ Layer 1: User Input (Native)                                │
-│ User: "Найди красные кроссовки дешевле 5000 рублей"         │
-│ Tokens: ~15 (cheap, one-time)                               │
+│ Слой 1: Ввод пользователя (на родном языке)                 │
+│ Пользователь: "Найди красные кроссовки дешевле 5000 рублей"  │
+│ Токенов: ~15 (дешево, один раз)                             │
 ├─────────────────────────────────────────────────────────────┤
-│ Layer 2: Translation (Optional)                             │
-│ Thought: "User wants sneakers, color=red, price<5000 RUB"   │
-│ Tokens: ~12 (English, cheaper)                              │
+│ Слой 2: Перевод (опционально)                               │
+│ Мысль: "User wants sneakers, color=red, price<5000 RUB"     │
+│ Токенов: ~12 (английский, дешевле)                          │
 ├─────────────────────────────────────────────────────────────┤
-│ Layer 3: Internal Loop (English)                            │
-│ Reasoning: "I need search_product tool. Filters:..."        │
-│ Action: `search_product(query="red sneakers",...)`          │
-│ Tokens: ~25-50 per iteration (English, efficient)          │
+│ Слой 3: Внутренний цикл (английский)                        │
+│ Рассуждение: "I need search_product tool. Filters:..."       │
+│ Действие: `search_product(query="red sneakers",...)`        │
+│ Токенов: ~25-50 за итерацию (английский, эффективно)         │
 ├─────────────────────────────────────────────────────────────┤
-│ Layer 4: Output (Native)                                    │
-│ Response: "Я нашел три пары..."                             │
-│ Tokens: ~30-100 (only final output in Russian)              │
+│ Слой 4: Вывод (на родном языке)                             │
+│ Ответ: "Я нашел три пары..."                                │
+│ Токенов: ~30-100 (только финальный вывод на русском)        │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-**Total**: ~100-150 tokens for complex query
-vs ~250-400 tokens if everything in Russian
+**Итого**: ~100-150 токенов для сложного запроса
+vs ~250-400 токенов если всё на русском
 
-#### 8b. Why Natural Language Is Required (For Now)
+#### 8b. Почему естественный язык необходим (пока)
 
-LLMs exhibit **emergent reasoning** from being trained on human text. If you replace 
-Chain-of-Thought with pure JSON:
+LLM демонстрируют **возникшее рассуждение** благодаря обучению на человеческом тексте. 
+Если заменить цепочку рассуждений (CoT) на чистый JSON:
 
 ```json
-// Bad: Pure JSON reasoning
+// Плохо: Чистый JSON для рассуждений
 {"next_action": "search", "params": {...}}
 ```
 
-The model quality drops. It needs to "verbalize" the plan:
+Качество модели падает. Ей нужно "проговорить" план:
 
 ```
-// Good: Compact English CoT
+// Хорошо: Компактный CoT на английском
 Thought: Need to search products with color=red, price<5000.
 Action: search_product(...)
 ```
 
-**Exception**: Code-as-Language works for mathematical/logical tasks:
+**Исключение**: Код-as-Язык работает для математических/логических задач:
 ```python
-# Better than text for calculations
+// Лучше текста для вычислений
 result = [p for p in products if p.color == "red" and p.price < 5000]
 ```
 
-#### 8c. Code-as-Language Pattern
+#### 8c. Паттерн "Код как язык"
 
-For tasks involving calculation, data analysis, or complex logic, use Python instead 
-of natural language reasoning:
+Для задач с вычислениями, анализом данных или сложной логикой используйте Python 
+вместо рассуждений на естественном языке:
 
 ```python
-# Instead of: "Let me calculate the average..."
-# Use direct code execution:
+# Вместо: "Дай посчитаю среднее..."
+# Используем прямое выполнение кода:
 analysis = """
 import statistics
 prices = [p['price'] for p in search_results]
@@ -903,44 +903,44 @@ print(f"Average price: {avg}")
 """
 ```
 
-**When to use code vs text:**
+**Когда использовать код, а когда текст:**
 
-| Task Type | Best Format | Example |
-|-----------|-------------|---------|
-| Planning, decision-making | English CoT | "I should check memory first..." |
-| Math, data processing | Python code | `sum(values) / len(values)` |
-| Tool selection | Structured JSON | `{"tool": "web_search", ...}` |
-| Final user response | Native language | "Я нашел для вас..." |
+| Тип задачи | Лучший формат | Пример |
+|------------|--------------|--------|
+| Планирование, принятие решений | English CoT | "I should check memory first..." |
+| Математика, обработка данных | Python код | `sum(values) / len(values)` |
+| Выбор инструмента | Структурированный JSON | `{"tool": "web_search", ...}` |
+| Финальный ответ пользователю | Родной язык | "Я нашел для вас..." |
 
-#### 8d. Implementation Guidelines
+#### 8d. Рекомендации по внедрению
 
-**System Prompt (Layer 3 core):**
+**System Prompt (ядро Слоя 3):**
 ```yaml
 system_prompt: |
   You are Hermes, an AI assistant. Think in English, act efficiently.
-  When reasoning: use compact English (not flowery language).
-  When calling tools: use exact JSON schemas provided.
-  When responding to user: adapt to their language (Russian/English/etc).
+  При рассуждениях: используй компактный английский.
+  При вызове инструментов: используй точные предоставленные JSON-схемы.
+  При ответе пользователю: адаптируйся к его языку (русский/английский/др).
 ```
 
-**Prompt Template:**
+**Шаблон промпта:**
 ```
-[English system instructions - 8K tokens, cached]
-[English reasoning guidelines - 200 tokens]
-[User message in native language - 50 tokens]
-[Tool schemas - 8K tokens, cached]
+[Инструкции на английском - 8K токенов, кэшируется]
+[Рекомендации по рассуждениям на английском - 200 токенов]
+[Сообщение пользователя на родном языке - 50 токенов]
+[Схемы инструментов - 8K токенов, кэшируется]
 ```
 
-**Savings: ~30-50% on reasoning tokens**
-**Risk: Low** — English CoT is standard practice, native output is preserved
+**Экономия: ~30-50% на токенах рассуждений**
+**Риск: Низкий** — English CoT стандартная практика, нативный вывод сохраняется
 
 ---
 
-## Harness Quality (Indirect Token Savings)
+## Качество инструментов (Indirect Token Savings)
 
 Not all token waste comes from oversized prompts. A significant portion comes from **tool execution failures** that force retry loops — each retry is a full API round-trip.
 
-### Hashline-Enhanced File Editing
+### Редактирование файлов с хеш-линиями
 
 Current file editing tools require the model to reproduce content character-perfectly to identify what to change. This fails frequently on:
 
@@ -975,7 +975,7 @@ patch_hashline(path="/app/config.py", operations=[
 
 **Token savings:** Indirect. Each failed patch retry costs ~16.5K tokens (full API call). With 20% failure rate on edit tasks, hashline eliminates ~3.3K tokens per editing task on average.
 
-### TTSR (Time Traveling Streaming Rules)
+### TTSR (Правила с путешествием во времени)
 
 Rules that inject themselves into the conversation only when triggered by the model's output — zero upfront context cost.
 
@@ -1052,7 +1052,7 @@ Cron: /opt/hermes-agent/cron/
 
 ---
 
-## Offline Batch Processing (No API Costs)
+## Пакетная обработка офлайн (No API Costs)
 
 For workloads like backtesting, news aggregation, or bulk file processing, running entirely offline eliminates API costs and provider dependency risks.
 
@@ -1128,7 +1128,7 @@ Emergency (API down):
 
 ---
 
-## Use Case Matrix
+## Матрица вариантов использования
 
 | Scenario | Primary Cost | Best Optimizations | Expected Savings |
 |----------|-------------|-------------------|-----------------|
@@ -1194,7 +1194,7 @@ Baseline: 50-message session (Telegram, 30 tools, full context)
 
 ---
 
-## Implementation Roadmap
+## Дорожная карта внедрения
 
 ### Phase 1: Free wins (1-2 hours, zero risk)
 - [ ] `skip_context_files=True` for all messaging platforms
@@ -1288,7 +1288,7 @@ metrics:
   - session_resets: counter        # Should be <5% of sessions
   - tool_retry_rate: gauge         # Target: <10% (Hashline benefit)
 ```
-## Anti-Patterns
+## Антипаттерны
 
 ### ❌ Don't: Remove tools the user might need
 The agent without `terminal` can't run commands. The user has to re-enable it mid-session, which is confusing. Instead, use a "lite" toolset with a clear `/tools` toggle.
@@ -1310,7 +1310,7 @@ A trading bot needs finance skills, not mlops. A coding assistant needs AGENTS.m
 
 ---
 
-## Quick Reference: Token Costs
+## Быстрая справка: Token Costs
 
 | Content | Approximate tokens |
 |---------|-------------------|
