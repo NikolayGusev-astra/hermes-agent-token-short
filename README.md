@@ -15,6 +15,13 @@ Comprehensive strategies for reducing LLM token consumption in Hermes Agent depl
   - [Layer 5: History & Compression](#layer-5-history--compression)
   - [Layer 6: Model Routing](#layer-6-model-routing)
   - [Layer 7: Architectural Patterns](#layer-7-architectural-patterns)
+- [Harness Quality (Indirect Token Savings)](#harness-quality-indirect-token-savings)
+  - [Hashline-Enhanced File Editing](#hashline-enhanced-file-editing)
+  - [TTSR (Time Traveling Streaming Rules)](#ttsr-time-traveling-streaming-rules)
+  - [Workspace Files Optimization](#workspace-files-from-openclaw-anatomy)
+- [Offline Batch Processing (No API Costs)](#offline-batch-processing-no-api-costs)
+  - [MOEX Backtesting Pipeline](#scenario-moex-backtesting-with-local-models)
+  - [Provider Independence](#7e-provider-independence-resilience-layer)
 - [Use Case Matrix](#use-case-matrix)
 - [Implementation Roadmap](#implementation-roadmap)
 - [Anti-Patterns](#anti-patterns)
@@ -674,6 +681,230 @@ This runs on a $5/mo VPS with no GPU. Handles ~200 classifications/second.
 **Savings: Enables Layer 2b, 3d at near-zero runtime cost**
 **Risk: None — purely additive capability**
 
+#### 7e. Provider independence (resilience layer)
+
+Critical for deployments in jurisdictions with potential API access restrictions. Design for graceful degradation:
+
+```
+Priority 1: OpenRouter (broad model selection, pay-as-you-go)
+Priority 2: Direct provider API (Anthropic, OpenAI, Google)  
+Priority 3: Local models via Ollama/vLLM (full offline)
+Priority 4: Cached responses + rule-based fallbacks (emergency)
+```
+
+**Multi-provider router:**
+```python
+PROVIDER_CHAIN = [
+    {"provider": "openrouter", "model": "anthropic/claude-sonnet-4", "fallback_on": ["403", "451"]},
+    {"provider": "anthropic", "model": "claude-sonnet-4-20250514", "fallback_on": ["rate_limit"]},
+    {"provider": "local", "model": "qwen2.5:14b", "fallback_on": ["oom"]},
+    {"provider": "local", "model": "qwen2.5:3b", "fallback_on": []},  # always works
+]
+```
+
+**Local models for offline processing:**
+| Model | RAM | Use case | Latency |
+|-------|-----|----------|---------|
+| qwen2.5:3b (Q4) | ~2GB | Classification, routing, simple tasks | 5-15 tok/s CPU |
+| qwen2.5:7b (Q4) | ~4GB | Summarization, moderate reasoning | 3-8 tok/s CPU |
+| qwen2.5:14b (Q4) | ~8GB | Complex tasks, code generation | 1-4 tok/s CPU |
+| all-MiniLM-L6-v2 | ~250MB | Embeddings, semantic search | ~3ms/query |
+
+**Savings: Not about tokens — about survival.** Local models cost $0/token.
+**Risk: Quality significantly lower than frontier models. Use for batch/offline only.**
+
+---
+
+## Harness Quality (Indirect Token Savings)
+
+Not all token waste comes from oversized prompts. A significant portion comes from **tool execution failures** that force retry loops — each retry is a full API round-trip.
+
+### Hashline-Enhanced File Editing
+
+Current file editing tools require the model to reproduce content character-perfectly to identify what to change. This fails frequently on:
+
+- Whitespace/indentation mismatches
+- Multi-match ambiguity (same string appears twice)
+- Large files where the model "forgets" exact content
+
+**Hashline approach:** When the model reads a file, every line gets a content hash:
+
+```
+# read_file output with hashlines:
+  1:a3f|# Config
+  2:b12|DEBUG = True
+  3:c8e|PORT = 8080
+  4:d91|HOST = "0.0.0.0"
+```
+
+The model edits by referencing hashes instead of reproducing content:
+
+```
+# patch_hashline call:
+patch_hashline(path="/app/config.py", operations=[
+  {"action": "replace", "line": "b12", "content": "DEBUG = False"},
+  {"action": "insert_after", "line": "d91", "content": "WORKERS = 4"},
+])
+```
+
+**Benefits:**
+- No whitespace reproduction needed → fewer failures
+- File-change detection: if hash doesn't match → file was modified → reject safely
+- Works across all models uniformly (no format bias)
+
+**Token savings:** Indirect. Each failed patch retry costs ~16.5K tokens (full API call). With 20% failure rate on edit tasks, hashline eliminates ~3.3K tokens per editing task on average.
+
+### TTSR (Time Traveling Streaming Rules)
+
+Rules that inject themselves into the conversation only when triggered by the model's output — zero upfront context cost.
+
+**Traditional approach (expensive):**
+```
+System prompt: "Do not use deprecated API X. Follow pattern Y. 
+Remember constraint Z. Always check condition W..."
+→ All rules cost tokens on EVERY call, regardless of relevance
+```
+
+**TTSR approach (free until triggered):**
+```python
+TTSR_RULES = [
+    {
+        "name": "no-deprecated-api",
+        "trigger": r"import.*deprecated_module",  # regex on output stream
+        "inject": "System: The model is using deprecated API. Use new_api instead.",
+        "once_per_session": True,
+    },
+    {
+        "name": "test-required",
+        "trigger": r"def test_|class Test",
+        "inject": "System: When writing tests, use pytest fixtures.",
+        "once_per_session": True,
+    },
+]
+```
+
+Rules are watched client-side on the output stream. When a pattern matches:
+1. Stream aborts mid-response
+2. Rule injects as a system reminder
+3. Request retries with the new context
+4. Rule deactivates for the session
+
+**Token savings:** Rules that never trigger = 0 tokens. Only relevant rules activate. Typical saving: 500-2,000 tokens per session for coding tasks.
+
+### Workspace Files (from OpenClaw anatomy)
+
+Hermes Agent already supports workspace files. Optimization strategy:
+
+| File | Current behavior | Optimized behavior | Savings |
+|------|-----------------|-------------------|---------|
+| AGENTS.md | Always loaded (14K chars) | Gate on coding tasks only | -3,500 tok on messaging |
+| SOUL.md | Always loaded (537 chars) | Keep — tiny, always relevant | — |
+| MEMORY.md | Always loaded (2.8K chars) | Keep — core continuity | — |
+| USER.md | Always loaded (395 chars) | Keep — tiny | — |
+| IDENTITY.md | Not exists | Create (~200 chars), extract from AGENTS.md | Enables AGENTS.md skip |
+| TOOLS.md | Not exists | Create (~200 chars), paths to local scripts | -1 tool call per system query |
+| YYYY-MM-DD.md | Not exists | Cron writes daily summary | Free context on next day |
+| HEARTBEAT.md | Not exists | Optional, <500 chars, periodic tasks only | Adds context, use sparingly |
+
+**New files to create:**
+
+```markdown
+# IDENTITY.md (~100 chars)
+My name is Hermes, AI assistant. Concise, technical, efficient.
+
+# TOOLS.md (~200 chars)  
+Trading: /opt/trading-system/scripts/
+VPN: /opt/xray-subscription/
+Security: /opt/security-cam/
+Cron: /opt/hermes-agent/cron/
+
+# 2026-03-17.md (daily log, written by cron)
+## Completed
+- Optimized token consumption analysis
+- Added Hashline research to guide
+## In progress
+- Token optimization Phase 1
+## Decisions
+- Skip AGENTS.md for messaging platforms
+- Platform-gate mlops skills to CLI only
+```
+
+---
+
+## Offline Batch Processing (No API Costs)
+
+For workloads like backtesting, news aggregation, or bulk file processing, running entirely offline eliminates API costs and provider dependency risks.
+
+### Architecture
+
+```
+┌──────────────────────────────────────────────────────┐
+│                OFFLINE PIPELINE                       │
+│                                                       │
+│  Data Source          Processing         Output       │
+│  ──────────          ──────────         ──────       │
+│  MOEX CSV files  →   Local LLM      →   Signals      │
+│  RSS/Telegram    →   T5 Summarizer  →   Digest       │
+│  Git history     →   Classifier     →   Changelog    │
+│  Log files       →   Embedder       →   Anomalies    │
+│                                                       │
+│  All on local CPU, no API calls, $0 runtime cost     │
+└──────────────────────────────────────────────────────┘
+```
+
+### Scenario: MOEX Backtesting with Local Models
+
+```python
+# Pipeline: fetch → process → analyze → report
+# All local, no API dependency
+
+# Step 1: Data fetching (already have cron jobs)
+# fetch_moex.sh → /opt/trading-system/data/
+
+# Step 2: Local analysis
+# qwen2.5:7b on CPU processes 1000 tickers in ~30 minutes
+# Cost: $0 (vs ~$5-10 via API for same volume)
+
+# Step 3: Result storage
+# Structured JSON → dashboard / Telegram digest
+```
+
+**Model selection for batch workloads:**
+
+| Task | Model | Hardware | Speed | Cost |
+|------|-------|----------|-------|------|
+| News summarization (RU) | T5-small (Russian) | 2GB RAM | 2-3s/article | $0 |
+| Ticker classification | qwen2.5:3b (Q4) | 2GB RAM | 5 tok/s | $0 |
+| Pattern analysis | qwen2.5:7b (Q4) | 4GB RAM | 3 tok/s | $0 |
+| Full backtesting pipeline | qwen2.5:14b (Q4) | 8GB RAM | 1-4 tok/s | $0 |
+| Embedding + search | all-MiniLM-L6-v2 | 250MB RAM | 3ms/query | $0 |
+
+### When Offline Wins vs API
+
+| Criterion | API (OpenRouter) | Local (CPU) |
+|-----------|-----------------|-------------|
+| Cost per token | $0.003-0.015 | $0 |
+| Latency | 500-2000ms | 2000-50000ms |
+| Quality | Frontier | 60-80% of frontier |
+| Availability | Depends on internet | Always |
+| Privacy | Sent to provider | Stays local |
+| Volume limits | Rate limits | Only RAM/CPU |
+| **Best for** | Interactive chat | Batch processing, backtesting |
+
+### Hybrid Strategy
+
+```
+Interactive (user messages):
+  → Frontier model via API (quality matters)
+
+Batch processing (cron jobs):
+  → Local model (cost matters, time doesn't)
+
+Emergency (API down):
+  → Local model for basic tasks
+  → Cache + rules for everything else
+```
+
 ---
 
 ## Use Case Matrix
@@ -690,6 +921,10 @@ This runs on a $5/mo VPS with no GPU. Handles ~200 classifications/second.
 | **Subagent delegation** | Tool schemas passed down | 7a (micro-agents) | -50% |
 | **Long session (50+ turns)** | History accumulation | 5a + 5d | -60% of history |
 | **Batch processing** | Repeated system prompts | 7b (caching) | -80% cost |
+| **Offline backtesting** | Zero (local models) | Layer 7e + offline pipeline | -100% API cost |
+| **Emergency (API down)** | Zero (local models) | Layer 7e fallback chain | Resilience |
+| **Russian news digest** | Zero (T5 local) | Offline pipeline | -100% API cost |
+| **Edit-heavy coding** | Retry loops | Hashline (Harness section) | -20% retries |
 
 ---
 
@@ -719,7 +954,26 @@ This runs on a $5/mo VPS with no GPU. Handles ~200 classifications/second.
 
 **Expected: Additional -15% tokens, better relevance**
 
-### Phase 4: Architectural (1 week, higher risk)
+### Phase 4: Harness improvements (1-2 days, low risk)
+- [ ] Hashline-enhanced `read_file`: tag each line with `N:hash|content`
+- [ ] Hashline-aware `patch` tool: accept `line_hash` instead of `old_string`
+- [ ] TTSR (Time Traveling Streamed Rules): regex-triggered rule injection on output stream
+- [ ] TOOLS.md: short paths file for local scripts (~200 chars)
+- [ ] Daily logs (YYYY-MM-DD.md): cron writes summary, loads next day
+- [ ] IDENTITY.md: extract from AGENTS.md for platform-gated loading
+
+**Expected: -retries (saves ~20% extra API calls on edit tasks), zero context cost for TTSR rules**
+
+### Phase 5: Provider independence (2-3 days, medium risk)
+- [ ] Local ONNX embedding model (~250MB, no GPU) for skill/tool routing
+- [ ] Local T5/rubert for offline text summarization (Russian market data)
+- [ ] Direct Anthropic API fallback (bypass OpenRouter)
+- [ ] Multi-provider routing: OpenRouter primary → Anthropic direct → local models
+- [ ] Offline batch processing pipeline (backtesting, news aggregation)
+
+**Expected: Resilience to provider outages, zero-cost offline processing for batch jobs**
+
+### Phase 6: Architectural (1 week, higher risk)
 - [ ] Micro-agent architecture with router
 - [ ] Two-stage model routing (cheap classifier + expensive executor)
 - [ ] Automatic session hygiene with summarization
