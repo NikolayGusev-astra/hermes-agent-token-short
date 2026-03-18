@@ -1,138 +1,126 @@
 #!/usr/bin/env python3
 """
-Memory Save Tool — saves messages and state to Supabase
-Called by Hermes Agent for distributed memory sync
+Memory Save Tool — saves messages and state to Supabase.
+Called by Hermes Agent for distributed memory sync.
 """
 import os
 import sys
 import argparse
-import json
 from datetime import datetime, timezone
 
-# Add paths
-sys.path.insert(0, '/usr/local/lib/python3.7/dist-packages')
-sys.path.insert(0, '/home/<USER>/hermes')
+# Add hermes home to path
+HERMES_HOME = os.path.expanduser('~/.hermes')
+if HERMES_HOME not in sys.path:
+    sys.path.insert(0, HERMES_HOME)
 
-import requests
-
-# Config
-SUPABASE_URL = os.getenv('SUPABASE_URL', 'https://<SUPABASE_URL>')
-SUPABASE_KEY = os.getenv('SUPABASE_KEY', '<SUPABASE_KEY>')
-NODE_ID = os.getenv('NODE_ID', 'kozanout')
-
-REST_URL = SUPABASE_URL + '/rest/v1'
-HEADERS = {
-    'apikey': SUPABASE_KEY,
-    'Authorization': 'Bearer ' + SUPABASE_KEY,
-    'Content-Type': 'application/json',
-    'Prefer': 'return=minimal'
-}
+from memory_config import NODE_ID, CONTENT_MAX_LENGTH, DEBUG, log
+from supabase_client import get_client
 
 
-def save_message(role, content, session_id='default'):
-    """Save a message to session_history"""
-    data = {
-        'node_id': NODE_ID,
-        'session_id': session_id,
-        'role': role,
-        'content': content[:4000],  # Limit size
-        'created_at': datetime.now(timezone.utc).isoformat()
-    }
-    
+def save_message(role: str, content: str, session_id: str = 'default') -> bool:
+    """Save a message to session_history with deduplication."""
     try:
-        r = requests.post(REST_URL + '/session_history', headers=HEADERS, json=data, timeout=10)
-        if r.status_code in [200, 201]:
-            print("OK: Saved {} message ({} chars)".format(role, len(content)))
-            return True
+        client = get_client()
+        
+        # Generate idempotent message ID
+        message_id = client._make_hash_id(role, content)
+        
+        data = {
+            'node_id': NODE_ID,
+            'session_id': session_id,
+            'role': role,
+            'content': content[:CONTENT_MAX_LENGTH],
+            'message_id': message_id,
+            'created_at': datetime.now(timezone.utc).isoformat()
+        }
+        
+        success = client.post('session_history', data)
+        
+        if success:
+            print(f"OK: Saved {role} message ({len(content)} chars)")
         else:
-            print("ERROR: {} - {}".format(r.status_code, r.text[:100]))
-            return False
+            print(f"ERROR: Failed to save message")
+        
+        return success
+        
     except Exception as e:
-        print("ERROR: {}".format(e))
+        print(f"ERROR: {e}")
         return False
 
 
-def update_state(status='idle', task=None, summary=None):
-    """Update agent state"""
-    data = {
-        'node_id': NODE_ID,
-        'status': status,
-        'current_task': task or 'idle',
-        'summary': (summary or '')[:500],
-        'updated_at': datetime.now(timezone.utc).isoformat()
-    }
-    
+def update_state(
+    status: str = 'idle',
+    task: str = None,
+    summary: str = None
+) -> bool:
+    """Update agent state."""
     try:
-        # Try update first
-        r = requests.patch(
-            REST_URL + '/agent_state?node_id=eq.' + NODE_ID,
-            headers=HEADERS,
-            json=data,
-            timeout=10
-        )
+        client = get_client()
         
-        # If no rows updated, insert
-        if r.status_code == 200 and 'Prefer: return=representation' not in str(r.text):
-            count = len(r.json()) if r.text else 0
-            if count == 0:
-                r = requests.post(REST_URL + '/agent_state', headers=HEADERS, json=data, timeout=10)
+        data = {
+            'node_id': NODE_ID,
+            'status': status,
+            'current_task': task or 'idle',
+            'summary': (summary or '')[:500],
+            'updated_at': datetime.now(timezone.utc).isoformat()
+        }
         
-        if r.status_code in [200, 201, 204]:
-            print("OK: State updated (status={}, task={})".format(status, task))
-            return True
+        success = client.upsert_state('agent_state', data, key_field='node_id')
+        
+        if success:
+            print(f"OK: State updated (status={status}, task={task})")
         else:
-            print("ERROR: {} - {}".format(r.status_code, r.text[:100]))
-            return False
+            print(f"ERROR: Failed to update state")
+        
+        return success
+        
     except Exception as e:
-        print("ERROR: {}".format(e))
+        print(f"ERROR: {e}")
         return False
 
 
-def get_others():
-    """Get state of other nodes"""
+def get_others() -> list:
+    """Get state of other nodes."""
     try:
-        r = requests.get(
-            REST_URL + '/agent_state?select=node_id,status,current_task,summary,updated_at&node_id=neq.' + NODE_ID + '&order=updated_at.desc',
-            headers={k: v for k, v in HEADERS.items() if k != 'Prefer'},
-            timeout=10
+        client = get_client()
+        
+        nodes = client.get(
+            'agent_state',
+            select='node_id,status,current_task,summary,updated_at',
+            filters={'node_id': f'neq.{NODE_ID}'},
+            order='updated_at.desc'
         )
         
-        if r.status_code == 200:
-            data = r.json()
-            if not data:
-                print("No other nodes reporting")
-                return []
-            
-            print("Other nodes:")
-            for node in data:
-                # Calculate age
-                updated = node.get('updated_at', '')
-                try:
-                    then = datetime.fromisoformat(updated.replace('Z', '+00:00'))
-                    delta = datetime.now(timezone.utc) - then
-                    if delta.days > 0:
-                        age = "{}d".format(delta.days)
-                    elif delta.seconds >= 3600:
-                        age = "{}h".format(delta.seconds // 3600)
-                    elif delta.seconds >= 60:
-                        age = "{}m".format(delta.seconds // 60)
-                    else:
-                        age = "{}s".format(delta.seconds)
-                except:
-                    age = "?"
-                
-                print("  - {}: {} | {} | {} ago".format(
-                    node.get('node_id', '?'),
-                    node.get('status', '?'),
-                    (node.get('summary', '') or '')[:50],
-                    age
-                ))
-            return data
-        else:
-            print("ERROR: {}".format(r.status_code))
+        if not nodes:
+            print("No other nodes reporting")
             return []
+        
+        print("Other nodes:")
+        for node in nodes:
+            # Calculate age
+            updated = node.get('updated_at', '')
+            try:
+                then = datetime.fromisoformat(updated.replace('Z', '+00:00'))
+                delta = datetime.now(timezone.utc) - then
+                
+                if delta.days > 0:
+                    age = f"{delta.days}d"
+                elif delta.seconds >= 3600:
+                    age = f"{delta.seconds // 3600}h"
+                elif delta.seconds >= 60:
+                    age = f"{delta.seconds // 60}m"
+                else:
+                    age = f"{delta.seconds}s"
+            except Exception:
+                age = "?"
+            
+            print(f"  - {node.get('node_id', '?')}: {node.get('status', '?')} | "
+                  f"{(node.get('summary', '') or '')[:50]} | {age} ago")
+        
+        return nodes
+        
     except Exception as e:
-        print("ERROR: {}".format(e))
+        print(f"ERROR: {e}")
         return []
 
 
@@ -147,7 +135,7 @@ def main():
     
     # State mode
     parser.add_argument('--update-state', action='store_true', help='Update agent state')
-    parser.add_argument('--status', default='idle', choices=['idle', 'active', 'busy', 'error'],
+    parser.add_argument('--status', default='idle', choices=['idle', 'active', 'busy', 'error', 'offline'],
                        help='Agent status')
     parser.add_argument('--task', type=str, help='Current task name')
     parser.add_argument('--summary', type=str, help='Task summary')

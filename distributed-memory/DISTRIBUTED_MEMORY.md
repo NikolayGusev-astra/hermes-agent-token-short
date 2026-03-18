@@ -29,28 +29,41 @@ The distributed memory system allows Hermes agents running on different machines
 
 ## Components
 
-### 1. sitecustomize.py
-Python site-wide customization that hooks into Hermes Agent:
+### 1. memory_config.py
+Unified configuration module:
+- Loads environment variables from `.env` files
+- Validates required configuration
+- Provides constants for all modules
+
+### 2. supabase_client.py
+Base REST API client:
+- Singleton pattern for connection reuse
+- Retry with exponential backoff
+- Automatic content truncation
+- Message deduplication via `message_id`
+
+### 3. sitecustomize.py
+Python site-wide customization:
 - Loads environment variables from `.env` files
 - Patches AIAgent to save messages and update state
 - Provides memory context from other nodes
 - Installs import hook for dynamic patching
 
-### 2. memory_sync.py
+### 4. memory_sync.py
 Core synchronization module:
 - REST API client for Supabase
 - Caches other nodes' state locally
 - Provides functions to get other nodes' state
 - Updates current node's state
 
-### 3. memory_sync_wrapper.py
+### 5. memory_sync_wrapper.py
 Wrapper for quick synchronization:
 - Called at session start
 - Reads other nodes' state
 - Saves user messages
 - Saves assistant responses
 
-### 4. memory_save.py
+### 6. memory_save.py
 Tool for saving messages and state:
 - Command-line interface
 - Saves messages with role (user/assistant/tool/system)
@@ -62,10 +75,7 @@ Tool for saving messages and state:
 | Table | Purpose | Key Fields |
 |-------|---------|------------|
 | `agent_state` | Current state of each node | `node_id`, `status`, `current_task`, `summary`, `updated_at` |
-| `session_history` | Full conversation history | `node_id`, `session_id`, `role`, `content`, `created_at` |
-| `user_memory` | Long-term user preferences | `user_id`, `category`, `key`, `value` |
-| `shared_tasks` | Task coordination | `task_id`, `assigned_to`, `status` |
-| `node_logs` | Debug logs | `node_id`, `level`, `message`, `timestamp` |
+| `session_history` | Full conversation history | `node_id`, `session_id`, `role`, `content`, `message_id`, `created_at` |
 
 ## Configuration
 
@@ -78,8 +88,14 @@ NODE_ID=kozanout  # or frankfurt, nl-vps, etc.
 SUPABASE_URL=https://<PROJECT_ID>.supabase.co
 SUPABASE_KEY=<ANON_KEY>
 
-# Optional: Custom paths
+# Optional: Custom paths and tuning
 HERMES_HOME=/home/user/.hermes
+MEMORY_CACHE_TTL=30
+MEMORY_TIMEOUT=10
+MEMORY_CONTENT_LIMIT=4000
+MEMORY_ENABLE_RETRY=true
+MEMORY_RETRY_ATTEMPTS=3
+MEMORY_DEBUG=false
 ```
 
 ### memory.env (Recommended)
@@ -92,30 +108,26 @@ SUPABASE_KEY=<ANON_KEY>
 
 ## Installation
 
-### 1. Install sitecustomize.py
+### 1. Install memory modules
 ```bash
-# Copy to Python site-packages
-cp sitecustomize.py /usr/lib/python3.X/site-packages/
-
-# Or for virtual environments
-cp sitecustomize.py $VENV/lib/python3.X/site-packages/
-```
-
-### 2. Install memory tools
-```bash
-# Create tools directory
+# Create hermes directory
 mkdir -p ~/.hermes/tools
 
-# Copy tools
-cp memory_sync.py ~/.hermes/
+# Copy all modules
+cp memory_config.py supabase_client.py memory_sync.py ~/.hermes/
 cp memory_sync_wrapper.py ~/.hermes/
 cp memory_save.py ~/.hermes/tools/
+
+# Copy sitecustomize to site-packages
+cp sitecustomize.py /usr/lib/python3.X/site-packages/
+# Or for virtual environments
+cp sitecustomize.py $VENV/lib/python3.X/site-packages/
 
 # Make executable
 chmod +x ~/.hermes/tools/memory_save.py
 ```
 
-### 3. Configure environment
+### 2. Configure environment
 ```bash
 # Create memory.env
 cat > ~/.hermes/memory.env << EOF
@@ -123,6 +135,9 @@ NODE_ID=your_node_name
 SUPABASE_URL=https://<PROJECT_ID>.supabase.co
 SUPABASE_KEY=<ANON_KEY>
 EOF
+
+# Set permissions
+chmod 600 ~/.hermes/memory.env
 ```
 
 ## Usage
@@ -130,10 +145,10 @@ EOF
 ### Check Other Nodes
 ```bash
 # Get status of other nodes
-python3 ~/.hermes/memory_sync_wrapper.py
+python3 ~/.hermes/memory_sync_wrapper.py --get-others
 
 # Or manually
-python3 ~/.hermes/memory_sync.py --get-others
+python3 ~/.hermes/memory_sync.py
 ```
 
 ### Save Messages
@@ -158,12 +173,12 @@ python3 ~/.hermes/tools/memory_save.py --update-state --status idle --task "" --
 
 1. **Session Start**
    ```
-   Agent starts → memory_sync_wrapper.py → get other nodes' state
+   Agent starts → sitecustomize.py loads → get other nodes' state
    ```
 
 2. **During Conversation**
    ```
-   User message → save to session_history
+   User message → save to session_history (with deduplication)
    Assistant response → save to session_history
    ```
 
@@ -173,69 +188,99 @@ python3 ~/.hermes/tools/memory_save.py --update-state --status idle --task "" --
    Complete task → update_state(status=idle, task="", summary="Done")
    ```
 
+4. **Shutdown**
+   ```
+   SIGTERM/SIGINT → save final state (offline) → exit
+   ```
+
+## Key Features
+
+### Idempotent Messages
+Each message gets a unique `message_id` based on:
+- Node ID
+- Session ID
+- Role
+- Content (first 100 chars)
+- Timestamp
+
+This prevents duplicates when:
+- Agent restarts
+- Network retries
+- Multiple saves of same message
+
+### Retry Logic
+Automatic retry with exponential backoff:
+- Transient errors (429, 500-504)
+- Timeouts
+- Up to 3 attempts by default
+
+### Graceful Shutdown
+- SIGTERM/SIGINT handlers
+- Final state saved before exit
+- No lost updates on restart
+
 ## Best Practices
 
 ### 1. Use Environment Variables
 ```python
-# Good
-SUPABASE_URL = os.getenv('SUPABASE_URL', 'default_url')
+# Good - uses memory_config.py
+from memory_config import NODE_ID, SUPABASE_URL
 
-# Bad
-SUPABASE_URL = 'https://actual-url.supabase.co'  # Exposed in code
+# Environment variables are loaded automatically
+# from ~/.hermes/memory.env
 ```
 
 ### 2. Limit Content Size
 ```python
-# Truncate large content
-content = str(content)[:3000]  # Limit to 3000 characters
+# Automatic truncation
+# Content over LIMIT is truncated before sending
+CONTENT_MAX_LENGTH = 4000  # default
 ```
 
 ### 3. Handle Errors Gracefully
 ```python
-try:
-    # API call
-    r = requests.post(url, json=data, timeout=10)
-    if r.status_code not in (200, 201):
-        print(f"Error: {r.status_code}")
-except Exception as e:
-    print(f"Exception: {e}")
+# All functions return bool for success/failure
+success = save_message('user', 'Hello')
+if not success:
+    # Handle error - already logged
+    pass
 ```
 
 ### 4. Use Batch Operations
 ```python
-# Save multiple messages at once
-messages = [...]
-BATCH = 100
-for i in range(0, len(messages), BATCH):
-    batch = messages[i:i+BATCH]
-    requests.post(url, json=batch, timeout=30)
+# Save multiple messages at once - each is idempotent
+for msg in messages:
+    save_message(msg['role'], msg['content'])
 ```
 
 ## Troubleshooting
 
 ### Common Issues
 
-1. **"No module named 'memory_sync'"**
-   - Check that memory_sync.py is in Python path
-   - Ensure ~/.hermes/ is in sys.path
+1. **"SUPABASE_URL and SUPABASE_KEY must be set"**
+   - Check that ~/.hermes/memory.env exists
+   - Verify format: `KEY=value` (no spaces around =)
 
-2. **"Connection timeout"**
+2. **"NODE_ID must be set"**
+   - Add `NODE_ID=your_name` to config
+
+3. **"No module named 'memory_sync'"**
+   - Check that files are in ~/.hermes/
+   - Ensure ~/.hermes/ is in Python path
+
+4. **"Connection timeout"**
    - Check network connectivity to Supabase
    - Verify SUPABASE_URL and SUPABASE_KEY are correct
 
-3. **"Permission denied"**
-   - Ensure scripts are executable: `chmod +x *.py`
-   - Check file ownership: `chown -R user:user ~/.hermes/`
-
-4. **"Duplicate entries"**
-   - System uses content-based deduplication
-   - Check for network retries causing duplicates
+5. **"Duplicate entries"**
+   - Should not happen with message_id deduplication
+   - Check database has unique constraint on message_id
 
 ### Debug Mode
-```python
-# Enable verbose logging
-import logging
-logging.basicConfig(level=logging.DEBUG)
+```bash
+# Enable debug logging
+export MEMORY_DEBUG=true
+python3 ~/.hermes/memory_sync.py
 ```
 
 ## Security Considerations
@@ -249,34 +294,39 @@ logging.basicConfig(level=logging.DEBUG)
 ## Performance
 
 - **Caching**: 30-second cache for other nodes' state
-- **Batch operations**: Use batch inserts for multiple messages
-- **Timeouts**: 10-30 second timeouts for API calls
-- **Content limits**: Truncate large messages (3000 chars)
+- **Retry**: Exponential backoff with 3 attempts
+- **Timeouts**: 10-second default for API calls
+- **Content limits**: Truncate large messages (4000 chars default)
+- **Dedup**: message_id prevents duplicates
 
-## Scaling
+## Database Schema (SQL)
 
-The system scales horizontally:
-- Each node operates independently
-- Supabase handles the coordination layer
-- No single point of failure (except Supabase itself)
-- Add new nodes by installing the same tools
-
-## Monitoring
-
-### Check Node Status
 ```sql
--- In Supabase SQL Editor
-SELECT node_id, status, current_task, updated_at 
-FROM agent_state 
-ORDER BY updated_at DESC;
-```
+-- agent_state table
+CREATE TABLE agent_state (
+    node_id TEXT PRIMARY KEY,
+    status TEXT DEFAULT 'idle',
+    current_task TEXT DEFAULT 'idle',
+    summary TEXT,
+    last_user_message TEXT,
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
 
-### View Recent Activity
-```sql
-SELECT node_id, role, LEFT(content, 50), created_at 
-FROM session_history 
-ORDER BY created_at DESC 
-LIMIT 20;
+-- session_history table (with deduplication)
+CREATE TABLE session_history (
+    id SERIAL PRIMARY KEY,
+    node_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    role TEXT NOT NULL,
+    content TEXT NOT NULL,
+    message_id TEXT UNIQUE,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Index for efficient queries
+CREATE INDEX idx_session_history_node ON session_history(node_id, session_id);
+CREATE INDEX idx_session_history_created ON session_history(created_at DESC);
+CREATE INDEX idx_agent_state_updated ON agent_state(updated_at DESC);
 ```
 
 ## Integration with Hermes Agent
@@ -308,3 +358,18 @@ NODE_ID=nl-vps
 ```
 
 All nodes share the same Supabase project and can see each other's state.
+
+## Version History
+
+### v2.0 (Current)
+- Unified configuration via memory_config.py
+- Base client with retry and deduplication
+- Deterministic session IDs
+- Graceful shutdown handlers
+- Improved error handling
+
+### v1.0 (Legacy)
+- Original implementation
+- Hardcoded URLs and keys
+- No retry logic
+- Session leaks on restart

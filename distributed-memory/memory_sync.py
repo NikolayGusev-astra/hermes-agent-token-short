@@ -1,155 +1,162 @@
 #!/usr/bin/env python3
 """
-Distributed Hermes Memory — Supabase sync via REST API
-No dependencies except requests
+Distributed Hermes Memory — Supabase sync via REST API.
+Uses unified config and Supabase client.
 """
-
 import os
+import sys
 import time
-import json
+import threading
+import signal
 from datetime import datetime, timedelta, timezone
+from typing import List, Dict, Optional, Callable
 
-try:
-    import requests
-except ImportError:
-    print("ERROR: pip install requests")
-    exit(1)
+# Add hermes home to path
+HERMES_HOME = os.path.expanduser('~/.hermes')
+if HERMES_HOME not in sys.path:
+    sys.path.insert(0, HERMES_HOME)
 
-# ─── Config ──────────────────────────────────────────────────────────────────
-SUPABASE_URL = os.getenv('SUPABASE_URL', 'https://<SUPABASE_URL>')
-SUPABASE_KEY = os.getenv('SUPABASE_KEY', '<SUPABASE_KEY>')
-NODE_ID = os.getenv('NODE_ID', 'unknown')
+from memory_config import (
+    NODE_ID, CACHE_TTL, DEBUG, log
+)
+from supabase_client import get_client
 
-REST_URL = SUPABASE_URL + '/rest/v1/agent_state'
-HEADERS = {
-    'apikey': SUPABASE_KEY,
-    'Authorization': 'Bearer ' + SUPABASE_KEY,
-    'Content-Type': 'application/json',
-    'Prefer': 'return=representation'
-}
 
-# ─── Local Cache ─────────────────────────────────────────────────────────────
-_OTHER_NODES_CACHE = {}
-_CACHE_TIMESTAMP = 0
-CACHE_TTL = 30
+# Local cache
+_other_nodes_cache: Dict = {}
+_cache_timestamp: float = 0
+_cache_lock = threading.Lock()
 
-# ─── Realtime ────────────────────────────────────────────────────────────────
-_realtime_thread = None
+# Realtime polling
+_realtime_thread: Optional[threading.Thread] = None
 _realtime_running = False
 
 
-def is_cache_fresh():
-    return (time.time() - _CACHE_TIMESTAMP) < CACHE_TTL
-
-
-def humanize_age(iso_time):
+def _humanize_age(iso_time: str) -> str:
+    """Convert ISO timestamp to human-readable age."""
     if not iso_time:
         return "unknown"
-    then = datetime.fromisoformat(iso_time.replace('Z', '+00:00'))
-    now = datetime.now(timezone.utc)
-    delta = now - then
-    
-    if delta.days > 0:
-        return "{}d {}h".format(delta.days, delta.seconds // 3600)
-    elif delta.seconds >= 3600:
-        return "{}h {}m".format(delta.seconds // 3600, (delta.seconds % 3600) // 60)
-    elif delta.seconds >= 60:
-        return "{}m".format(delta.seconds // 60)
-    else:
-        return "{}s".format(delta.seconds)
+    try:
+        then = datetime.fromisoformat(iso_time.replace('Z', '+00:00'))
+        now = datetime.now(timezone.utc)
+        delta = now - then
+        
+        if delta.days > 0:
+            return f"{delta.days}d {delta.seconds // 3600}h"
+        elif delta.seconds >= 3600:
+            return f"{delta.seconds // 3600}h {(delta.seconds % 3600) // 60}m"
+        elif delta.seconds >= 60:
+            return f"{delta.seconds // 60}m"
+        else:
+            return f"{delta.seconds}s"
+    except Exception:
+        return "unknown"
 
 
-def pre_hook_inject_context(base_prompt):
-    """Read other nodes state, inject into system prompt"""
-    global _OTHER_NODES_CACHE, _CACHE_TIMESTAMP
+def is_cache_fresh() -> bool:
+    """Check if cache is still valid."""
+    return (time.time() - _cache_timestamp) < CACHE_TTL
+
+
+def get_other_nodes(force_refresh: bool = False) -> List[Dict]:
+    """Get state of other nodes from cache or API."""
+    global _other_nodes_cache, _cache_timestamp
     
-    if is_cache_fresh() and _OTHER_NODES_CACHE:
-        others = list(_OTHER_NODES_CACHE.values())
-    else:
+    with _cache_lock:
+        if is_cache_fresh() and _other_nodes_cache and not force_refresh:
+            return list(_other_nodes_cache.values())
+        
         try:
+            client = get_client()
             cutoff = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat()
-            params = {
-                'select': 'node_id,status,current_task,summary,updated_at',
-                'node_id': 'neq.' + NODE_ID,
-                'updated_at': 'gt.' + cutoff,
-                'order': 'updated_at.desc'
-            }
-            r = requests.get(REST_URL, headers=HEADERS, params=params, timeout=10)
-            r.raise_for_status()
-            others = r.json()
             
-            _OTHER_NODES_CACHE = {node['node_id']: node for node in others}
-            _CACHE_TIMESTAMP = time.time()
+            others = client.get(
+                'agent_state',
+                select='node_id,status,current_task,summary,updated_at',
+                filters={'node_id': f'neq.{NODE_ID}', 'updated_at': f'gt.{cutoff}'},
+                order='updated_at.desc'
+            )
+            
+            _other_nodes_cache = {node['node_id']: node for node in (others or [])}
+            _cache_timestamp = time.time()
+            
+            if DEBUG:
+                log(f"Fetched {len(_other_nodes_cache)} other nodes")
+            
+            return list(_other_nodes_cache.values())
+            
         except Exception as e:
-            print("[MEMORY_SYNC] Error: {}".format(e))
-            others = list(_OTHER_NODES_CACHE.values()) if _OTHER_NODES_CACHE else []
+            log(f"Error fetching nodes: {e}")
+            return list(_other_nodes_cache.values()) if _other_nodes_cache else []
+
+
+def inject_context(base_prompt: str) -> str:
+    """Read other nodes state, inject into system prompt."""
+    others = get_other_nodes()
     
     if not others:
         return base_prompt
     
-    lines = ["\nDISTRIBUTED STATE (other nodes):"]
+    lines = ["\n\nDISTRIBUTED STATE (other nodes):"]
     for node in others:
-        age = humanize_age(node.get('updated_at'))
+        age = _humanize_age(node.get('updated_at'))
         lines.append(
-            "\n{}:".format(node['node_id']) +
-            "\n   Status: " + str(node.get('status', 'unknown')) +
-            "\n   Task: " + str(node.get('current_task', 'idle')) +
-            "\n   Summary: " + str(node.get('summary', 'n/a')) +
-            "\n   Updated: " + age + " ago"
+            f"\n{node['node_id']}:"
+            f"\n   Status: {node.get('status', 'unknown')}"
+            f"\n   Task: {node.get('current_task', 'idle')}"
+            f"\n   Summary: {node.get('summary', 'n/a')}"
+            f"\n   Updated: {age} ago"
         )
     
-    return base_prompt + "\n".join(lines)
+    return base_prompt + "".join(lines)
 
 
-def post_hook_save_state(status='active', current_task=None, summary=None, last_user_msg=None):
-    """Save own state"""
+def save_state(
+    status: str = 'active',
+    current_task: Optional[str] = None,
+    summary: Optional[str] = None,
+    last_user_msg: Optional[str] = None
+) -> bool:
+    """Save current node state to database."""
     try:
+        client = get_client()
+        
         data = {
             'node_id': NODE_ID,
             'status': status,
             'current_task': current_task or 'idle',
-            'last_user_message': (last_user_msg or '')[:200],
+            'last_user_message': (last_user_msg or '')[:200] if last_user_msg else '',
             'summary': (summary or '')[:500],
             'updated_at': datetime.now(timezone.utc).isoformat()
         }
-        r = requests.post(REST_URL, headers=HEADERS, json=data, timeout=10)
         
-        # If conflict (node exists), update instead
-        if r.status_code == 409:
-            r = requests.patch(
-                REST_URL + '?node_id=eq.' + NODE_ID,
-                headers=HEADERS,
-                json=data,
-                timeout=10
-            )
+        success = client.upsert_state('agent_state', data, key_field='node_id')
         
-        r.raise_for_status()
-        print("[MEMORY_SYNC] State saved: {}".format(status))
-        return True
+        if DEBUG:
+            log(f"State saved: {status}")
+        
+        return success
+        
     except Exception as e:
-        print("[MEMORY_SYNC] Error saving: {}".format(e))
+        log(f"Error saving state: {e}")
         return False
 
 
-def get_others_state():
-    """Get cached state of other nodes"""
-    return list(_OTHER_NODES_CACHE.values())
+def get_node_state(node_id: str) -> Optional[Dict]:
+    """Get state of specific node from cache."""
+    with _cache_lock:
+        return _other_nodes_cache.get(node_id)
 
 
-def get_node_state(node_id):
-    """Get state of specific node"""
-    return _OTHER_NODES_CACHE.get(node_id)
+def refresh_cache() -> None:
+    """Force refresh cache from server."""
+    global _cache_timestamp
+    _cache_timestamp = 0
+    get_other_nodes(force_refresh=True)
 
 
-def refresh_cache():
-    """Force refresh cache from server"""
-    global _CACHE_TIMESTAMP
-    _CACHE_TIMESTAMP = 0
-    return pre_hook_inject_context("")
-
-
-def watch_other_nodes(callback=None, interval=5):
-    """Simple polling for changes (no websocket needed)"""
+def watch_other_nodes(callback: Optional[Callable] = None, interval: int = 5) -> None:
+    """Start polling for changes in other nodes."""
     global _realtime_running, _realtime_thread
     
     if _realtime_running:
@@ -161,56 +168,74 @@ def watch_other_nodes(callback=None, interval=5):
         last_seen = {}
         while _realtime_running:
             try:
+                client = get_client()
                 cutoff = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
-                params = {
-                    'select': 'node_id,updated_at,summary,status',
-                    'node_id': 'neq.' + NODE_ID,
-                    'updated_at': 'gt.' + cutoff,
-                    'order': 'updated_at.desc'
-                }
-                r = requests.get(REST_URL, headers=HEADERS, params=params, timeout=10)
-                if r.status_code == 200:
-                    for node in r.json():
+                
+                others = client.get(
+                    'agent_state',
+                    select='node_id,updated_at,summary,status,current_task',
+                    filters={'node_id': f'neq.{NODE_ID}', 'updated_at': f'gt.{cutoff}'},
+                    order='updated_at.desc'
+                )
+                
+                if others:
+                    for node in others:
                         nid = node['node_id']
-                        if nid not in last_seen or last_seen[nid] != node.get('updated_at'):
-                            last_seen[nid] = node.get('updated_at')
-                            _OTHER_NODES_CACHE[nid] = node
-                            age = humanize_age(node.get('updated_at'))
-                            print("[SYNC] {}: {} ({} ago)".format(
-                                nid, (node.get('summary', ''))[:60], age))
+                        updated = node.get('updated_at')
+                        
+                        if nid not in last_seen or last_seen[nid] != updated:
+                            last_seen[nid] = updated
+                            
+                            with _cache_lock:
+                                _other_nodes_cache[nid] = node
+                            
+                            age = _humanize_age(updated)
+                            log(f"{nid}: {node.get('summary', '')[:60]} ({age} ago)")
+                            
                             if callback:
                                 callback(node)
+                                
             except Exception as e:
-                print("[MEMORY_SYNC] Poll error: {}".format(e))
+                log(f"Poll error: {e}")
             
             time.sleep(interval)
     
-    import threading
     _realtime_thread = threading.Thread(target=poll_loop, daemon=True)
     _realtime_thread.start()
-    print("[MEMORY_SYNC] Polling started (interval: {}s)".format(interval))
+    log(f"Polling started (interval: {interval}s)")
 
 
-def stop_watching():
+def stop_watching() -> None:
+    """Stop polling for node changes."""
     global _realtime_running
     _realtime_running = False
-    print("[MEMORY_SYNC] Polling stopped")
+    log("Polling stopped")
+
+
+def graceful_shutdown(signum=None, frame=None) -> None:
+    """Handle shutdown signals gracefully."""
+    log("Shutting down...")
+    stop_watching()
+    save_state('offline', 'shutdown', 'Agent stopped')
+    sys.exit(0)
+
+
+# Register signal handlers
+signal.signal(signal.SIGTERM, graceful_shutdown)
+signal.signal(signal.SIGINT, graceful_shutdown)
 
 
 if __name__ == '__main__':
     print("Memory Sync Module (REST API)")
-    print("=============================")
-    print("Node:", NODE_ID)
-    print("URL:", SUPABASE_URL)
+    print("=" * 40)
+    print(f"Node: {NODE_ID}")
+    print(f"Session: {os.getenv('SESSION_ID', 'N/A')}")
     print("")
     
-    print("Testing...")
+    print("Testing connection...")
     try:
-        r = requests.get(REST_URL, headers=HEADERS, params={'select': 'node_id', 'limit': 1}, timeout=10)
-        if r.status_code == 200:
-            print("OK! Table accessible")
-            print("Rows:", len(r.json()))
-        else:
-            print("Error:", r.status_code, r.text[:100])
+        client = get_client()
+        nodes = client.get('agent_state', select='node_id', limit=1)
+        print(f"OK! Table accessible, {len(nodes or [])} rows")
     except Exception as e:
-        print("Error:", e)
+        print(f"Error: {e}")
