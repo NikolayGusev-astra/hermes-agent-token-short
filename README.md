@@ -111,10 +111,24 @@ No code changes. Flip existing config flags.
 
 AGENTS.md, .cursorrules, and SOUL.md are development guides loaded into every API call. In messaging platforms (Telegram, WhatsApp, Signal, Discord) they are almost never relevant.
 
+**Already implemented** — `AIAgent.__init__()` accepts `skip_context_files` parameter:
+
+```python
+# run_agent.py:305
+skip_context_files: bool = False,
+
+# run_agent.py:1951 — the actual gate
+if not self.skip_context_files:
+    context_files_text = build_context_files_prompt(cwd=cwd)
+```
+
+Config via `config.yaml`:
 ```yaml
-# config.yaml — already supported via AIAgent param
+# config.yaml
 skip_context_files: true  # or pass per-platform
 ```
+
+Context file loading is in `agent/prompt_builder.py:437` — `build_context_files_prompt()` discovers AGENTS.md (recursive), .cursorrules, and SOUL.md. Each capped at 20,000 chars (`CONTEXT_FILE_MAX_CHARS`).
 
 **Savings: ~3,500 tokens per call (-21%)**
 **Risk: Zero** — context files are only needed in CLI/coding scenarios. If a messaging user references a project, the agent can use file tools to read it on demand.
@@ -161,25 +175,36 @@ Make context loading conditional on platform and task type.
 
 Not all skills are relevant for all platforms. A Telegram user never needs `mlops/training/axolotl`.
 
-```python
-# In skill frontmatter (SKILL.md):
+**Already implemented** — skills declare platform restrictions in YAML frontmatter:
+
+```yaml
+# In SKILL.md frontmatter:
 ---
 name: axolotl
 description: Fine-tune LLMs with Axolotl
 metadata:
   hermes:
     platforms: ["cli"]  # Only show in CLI mode
+    requires_tools: ["terminal", "execute_code"]
+    requires_env: ["CUDA_VISIBLE_DEVICES"]
 ---
 ```
 
-Then in `prompt_builder.py`, filter by platform:
-
+Filtering is in `agent/prompt_builder.py:321` — `build_skills_system_prompt()`:
 ```python
-def build_skills_system_prompt(platform: str = None, ...):
-    # Skip skills that don't match current platform
-    if not skill_matches_platform(frontmatter, platform):
+# prompt_builder.py:346-352
+for skill_file in skills_dir.rglob("SKILL.md"):
+    is_compatible, _, desc = _parse_skill_file(skill_file)
+    if not is_compatible:
+        continue
+    conditions = _read_skill_conditions(skill_file)
+    if not _skill_should_show(conditions, available_tools, available_toolsets, current_platform=platform):
         continue
 ```
+
+Platform matching via `tools/skills_tool.py:118` — `skill_matches_platform()` checks `hermes_platforms` field against current platform (cli/telegram/discord/etc).
+
+Tool requirement gating via `agent/prompt_builder.py:282` — `_skill_should_show()` hides skills when `requires_tools` or `requires_toolsets` aren't available.
 
 **Categorization by relevance:**
 
@@ -199,24 +224,44 @@ def build_skills_system_prompt(platform: str = None, ...):
 
 #### 1b. Platform-specific toolsets
 
-Define separate toolsets per platform with different tool scopes:
+**Already implemented** — `toolsets.py` defines per-platform toolsets with shared `_HERMES_CORE_TOOLS`:
 
 ```python
+# toolsets.py:31-67 — shared core (all platforms get these)
+_HERMES_CORE_TOOLS = [
+    "web_search", "web_extract",
+    "terminal", "process",
+    "read_file", "write_file", "patch", "search_files",
+    "vision_analyze", "image_generate",
+    "skills_list", "skill_view", "skill_manage",
+    "browser_navigate", "browser_snapshot", "browser_click", ...
+    "text_to_speech", "todo", "memory", "session_search",
+    "clarify", "execute_code", "delegate_task",
+    "cronjob", "send_message",
+    # + honcho, homeassistant tools (gated via check_fn)
+]
+
+# toolsets.py:259-305 — per-platform toolsets
+"hermes-telegram": {"tools": _HERMES_CORE_TOOLS, ...},
+"hermes-discord":  {"tools": _HERMES_CORE_TOOLS, ...},
+"hermes-cli":      {"tools": _HERMES_CORE_TOOLS, ...},
+```
+
+**Optimization opportunity:** Current per-platform toolsets are identical (all use `_HERMES_CORE_TOOLS`). Creating platform-specific subsets would save tokens:
+```python
+# Proposed: toolsets.py
 "hermes-telegram-lite": {
     "tools": [
-        "web_search", "web_extract",
-        "terminal", "process",
+        "web_search", "web_extract", "terminal", "process",
         "read_file", "write_file", "search_files",
-        "memory", "session_search",
-        "clarify", "send_message",
-        "text_to_speech",
-        "todo",
-        "skills_list", "skill_view", "skill_manage",
-        "cronjob",
+        "memory", "session_search", "clarify", "send_message",
+        "todo", "skills_list", "skill_view", "skill_manage", "cronjob",
     ],
-    # NO browser tools, NO execute_code, NO patch, NO delegate
+    # NO browser, NO execute_code, NO patch, NO delegate
 }
 ```
+
+Toolset resolution is recursive: `toolsets.py:331` — `resolve_toolset()` handles composition via `includes`.
 
 **Savings: ~5,000 tokens from removed schemas (-30%)**
 **Risk: Medium** — user loses instant access to removed tools. Mitigate with `skills_list` fallback or `/tools` toggle.
@@ -548,15 +593,38 @@ Conversation history grows linearly with each turn. Unchecked, it becomes the do
 
 #### 5a. Context compression (already implemented)
 
-Hermes Agent's `ContextCompressor` summarizes middle turns when context exceeds threshold (default 50%). Uses a cheap model (e.g., Gemini Flash) to compress.
+**Fully implemented** — `agent/context_compressor.py` provides `ContextCompressor` class:
 
-**Key settings:**
 ```python
-ContextCompressor(
-    threshold_percent=0.50,     # compress at 50% context
-    protect_first_n=3,          # always keep first 3 turns
-    protect_last_n=4,           # always keep last 4 turns
-    summary_target_tokens=2500, # aim for 2.5K token summary
+# agent/context_compressor.py:31-66
+class ContextCompressor:
+    def __init__(self, model, threshold_percent=0.50,
+                 protect_first_n=3, protect_last_n=4,
+                 summary_target_tokens=2500, ...):
+        self.context_length = get_model_context_length(model)
+        self.threshold_tokens = int(self.context_length * threshold_percent)
+```
+
+Configuration via `config.yaml`:
+```yaml
+# config.yaml — compression section
+compression:
+  enabled: true
+  threshold: 0.50          # compress at 50% context
+  summary_model: "google/gemini-3-flash-preview"  # cheap/fast summarizer
+```
+
+Initialization in `run_agent.py:840-862`:
+```python
+# run_agent.py:848
+compression_threshold = float(_compression_cfg.get("threshold", 0.50))
+compression_enabled = str(_compression_cfg.get("enabled", True)).lower() in ("true", "1", "yes")
+
+# run_agent.py:852
+self.context_compressor = ContextCompressor(
+    model=self.model,
+    threshold_percent=compression_threshold,
+    summary_model_override=compression_summary_model,
 )
 ```
 
@@ -591,7 +659,22 @@ Use prompt caching (Anthropic's cache_control) to mark the system prompt + tool 
 - Cache miss triggers: system prompt change, tool schema update, memory modification
 
 **Optimization strategy:** Structure prompt with stable prefix (identity, tools, skills) and variable suffix (memory, history, timestamp). Mark breakpoint after skills index.
-**Already implemented** in Hermes Agent via `apply_anthropic_cache_control()`.
+**Already implemented** in `agent/prompt_caching.py` — `apply_anthropic_cache_control()`:
+
+```python
+# agent/prompt_caching.py:40-70
+def apply_anthropic_cache_control(api_messages, cache_ttl="5m"):
+    """Apply system_and_3 caching strategy.
+    Places up to 4 cache_control breakpoints:
+    system prompt + last 3 non-system messages."""
+    marker = {"type": "ephemeral"}
+    # Mark system message
+    if messages[0].get("role") == "system":
+        _apply_cache_marker(messages[0], marker)
+    # Mark last 3 non-system messages (rolling window)
+    for idx in non_sys[-remaining:]:
+        _apply_cache_marker(messages[idx], marker)
+```
 
 **Savings: 75-90% cost on cached prefix (not tokens, but dollars)**
 **Risk: Cache breaks if system prompt changes mid-conversation** (hence the "don't modify prompt mid-session" policy)
@@ -1450,3 +1533,76 @@ The distributed memory system includes example code for:
 - Batch operations for efficiency
 
 All code is available in the `distributed-memory/` directory.
+
+---
+
+## Codebase Reference (hermes-agent)
+
+All optimization strategies above are mapped to actual source files in the [hermes-agent](https://github.com/nousresearch/hermes-agent) codebase.
+
+### System Prompt Assembly
+| Component | File | Key Function/Line |
+|-----------|------|-------------------|
+| Identity + guidance | `agent/prompt_builder.py` | `DEFAULT_AGENT_IDENTITY` (L118), `MEMORY_GUIDANCE` (L128) |
+| Platform hints | `agent/prompt_builder.py` | `PLATFORM_HINTS` dict (L157) |
+| Skills index | `agent/prompt_builder.py` | `build_skills_system_prompt()` (L321) |
+| Context files (AGENTS.md) | `agent/prompt_builder.py` | `build_context_files_prompt()` (L437) |
+| Context file gating | `run_agent.py` | `skip_context_files` param (L305), gate at L1951 |
+| Prompt injection scanning | `agent/prompt_builder.py` | `_scan_context_content()` (L39) |
+
+### Tool System
+| Component | File | Key Function/Line |
+|-----------|------|-------------------|
+| Tool registry | `tools/registry.py` | Self-registration via `registry.register()` |
+| Tool discovery | `model_tools.py` | `_discover_tools()` (L69) — imports all tool modules |
+| Toolset definitions | `toolsets.py` | `TOOLSETS` dict (L72), `_HERMES_CORE_TOOLS` (L31) |
+| Toolset resolution | `toolsets.py` | `resolve_toolset()` (L331) — recursive composition |
+| Per-platform config | `hermes_cli/tools_config.py` | `CONFIGURABLE_TOOLSETS` (L78) |
+| Tool definitions API | `model_tools.py` | `get_tool_definitions()` — consumed by `run_agent.py` |
+
+### Skills System
+| Component | File | Key Function/Line |
+|-----------|------|-------------------|
+| Platform gating | `tools/skills_tool.py` | `skill_matches_platform()` (L118) |
+| Conditional activation | `agent/prompt_builder.py` | `_skill_should_show()` (L282), `_read_skill_conditions()` (L263) |
+| Skills hub CLI | `hermes_cli/skills_hub.py` | Unified search + install |
+
+### Context Compression
+| Component | File | Key Function/Line |
+|-----------|------|-------------------|
+| ContextCompressor class | `agent/context_compressor.py` | Full class (L31), `should_compress()` (L74) |
+| Compression init | `run_agent.py` | Config loading (L840-862), `ContextCompressor` instantiation (L852) |
+| Config: threshold | `config.yaml` | `compression.threshold` (default 0.50) |
+| Config: summary model | `config.yaml` | `compression.summary_model` |
+
+### Prompt Caching
+| Component | File | Key Function/Line |
+|-----------|------|-------------------|
+| Anthropic cache control | `agent/prompt_caching.py` | `apply_anthropic_cache_control()` (L40) |
+| Cache strategy | `agent/prompt_caching.py` | system_and_3: 4 breakpoints (system + last 3 messages) |
+
+### Session Management
+| Component | File | Key Function/Line |
+|-----------|------|-------------------|
+| Session reset policies | `gateway/session.py` | `_should_reset()` (L576), `SessionResetPolicy` |
+| Auto-reset evaluation | `gateway/session.py` | `is_session_expired()` (L539) |
+
+### Distributed Memory
+| Component | File | Key Function/Line |
+|-----------|------|-------------------|
+| Supabase sync | `~/.hermes/memory_sync.py` | `get_other_nodes()`, `save_state()` |
+| Node state | Supabase `agent_state` table | node_id, status, current_task, summary |
+| Session history | Supabase `session_history` table | Cross-node message sharing |
+
+### Trajectory Compression (Batch/RL)
+| Component | File | Key Function/Line |
+|-----------|------|-------------------|
+| Trajectory compressor | `trajectory_compressor.py` | `CompressionConfig` (L54), full CLI |
+| Compression strategy | `trajectory_compressor.py` | Protect head/tail, summarize middle |
+
+### Gateway (Platform Routing)
+| Component | File | Key Function/Line |
+|-----------|------|-------------------|
+| Platform enum | `gateway/config.py` | `Platform` enum (L35) — 13 platforms |
+| Session source | `gateway/session.py` | `SessionSource` dataclass (L67) |
+| Home channels | `gateway/config.py` | `HomeChannel` dataclass (L52) |
