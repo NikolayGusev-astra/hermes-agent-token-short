@@ -24,6 +24,7 @@ Comprehensive strategies for reducing LLM token consumption in Hermes Agent depl
   - [MOEX Backtesting Pipeline](#scenario-moex-backtesting-with-local-models)
   - [Provider Independence](#7e-provider-independence-resilience-layer)
 - [Use Case Matrix](#use-case-matrix)
+  - [Distributed Memory System](#distributed-memory-system)
 - [Implementation Roadmap](#implementation-roadmap)
 - [Anti-Patterns](#anti-patterns)
 
@@ -1367,3 +1368,85 @@ A trading bot needs finance skills, not mlops. A coding assistant needs AGENTS.m
 ## License
 
 This document is a reference guide. Use freely in your Hermes Agent deployments.
+
+
+---
+
+## Distributed Memory System
+
+Cross-node memory synchronization for multi-agent deployments. Enables Hermes agents on different machines to share conversation history, state, and context.
+
+### Architecture
+
+```
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│  Node A     │     │  Node B     │     │  Node C     │
+│  (kozanout) │     │ (frankfurt) │     │  (nl-vps)   │
+└─────────────┘     └─────────────┘     └─────────────┘
+       │                   │                   │
+       │                   │                   │
+       └───────────────────┼───────────────────┘
+                           │
+                    ┌─────────────┐
+                    │  Supabase   │
+                    │  (REST API) │
+                    └─────────────┘
+```
+
+### Key Features
+
+- **Cross-node synchronization**: Multiple agents share conversation history
+- **State management**: Track what each node is doing in real-time
+- **Persistent memory**: Conversations survive across sessions
+- **Automatic hooks**: Patches AIAgent to save messages transparently
+- **Lightweight**: Uses only REST API, no complex infrastructure
+
+### Components
+
+| Component | File | Purpose |
+|-----------|------|---------|
+| Hooks | `sitecustomize.py` | Patches AIAgent to auto-save messages |
+| Sync Core | `memory_sync.py` | REST API client for Supabase |
+| Wrapper | `memory_sync_wrapper.py` | Quick sync at session start |
+| Tool | `memory_save.py` | CLI tool for saving messages/state |
+
+### Quick Start
+
+```bash
+# 1. Configure
+echo "NODE_ID=your_node" > ~/.hermes/memory.env
+echo "SUPABASE_URL=https://<PROJECT_ID>.supabase.co" >> ~/.hermes/memory.env
+echo "SUPABASE_KEY=<ANON_KEY>" >> ~/.hermes/memory.env
+
+# 2. Install
+cp distributed-memory/*.py ~/.hermes/
+cp distributed-memory/memory_save.py ~/.hermes/tools/
+cp distributed-memory/sitecustomize.py /usr/lib/python3.X/site-packages/
+
+# 3. Use
+python3 ~/.hermes/memory_sync_wrapper.py  # Check other nodes
+python3 ~/.hermes/tools/memory_save.py --role user --content "Hello"  # Save message
+```
+
+### Token Savings
+
+The distributed memory system helps reduce token consumption by:
+
+1. **Shared context**: Nodes can see what others are working on without asking
+2. **Persistent memory**: Long conversations don't need to be re-loaded each session
+3. **State coordination**: Agents know what others are doing, reducing redundant work
+4. **Selective loading**: Only load relevant historical context, not entire conversations
+
+### Documentation
+
+See [distributed-memory/DISTRIBUTED_MEMORY.md](distributed-memory/DISTRIBUTED_MEMORY.md) for complete documentation.
+
+### Code Examples
+
+The distributed memory system includes example code for:
+- Saving messages to shared history
+- Getting other nodes' state
+- Updating agent status
+- Batch operations for efficiency
+
+All code is available in the `distributed-memory/` directory.
